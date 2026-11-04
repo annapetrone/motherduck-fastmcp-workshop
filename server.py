@@ -3,6 +3,8 @@
 FastMCP Gateway runs this file. Its entrypoint setting is `server.py:mcp`.
 """
 
+import logging
+import re
 from collections import Counter, defaultdict
 from statistics import median
 from typing import Literal
@@ -11,11 +13,14 @@ from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 
 from sf311.data import BY_ID, LOCAL_NAMES, NEIGHBORHOODS, REQUESTS, SERVICES, Request, closest
+from sf311.kit import caller_email
 
 mcp = FastMCP("sf-311")
+logger = logging.getLogger("sf311")
 
 MAX_ROWS = 50
 MIN_CLOSED_FOR_MEDIAN = 10
+HOUSE_NUMBER = re.compile(r"^(\d+)\s+([^,]+)")
 
 GROUPS = {
     "neighborhood": lambda r: r.neighborhood,
@@ -34,6 +39,15 @@ def _check_name(kind: str, value: str | None, choices: list[str]) -> None:
     suggestions = closest(value, choices)
     hint = f"Did you mean: {', '.join(suggestions)}?" if suggestions else "Call dataset_info to see the valid names."
     raise ToolError(f"Unknown {kind} {value!r}. {hint}")
+
+
+def _masked(request: Request) -> dict:
+    """Return the request as a dict with its address reduced to the block."""
+    row = request.as_dict()
+    match = HOUSE_NUMBER.match(row["address"])
+    if match:
+        row["address"] = f"{int(match.group(1)) // 100 * 100} block of {match.group(2).strip()}"
+    return row
 
 
 def _matching(service: str | None, neighborhood: str | None = None, status: str | None = None) -> list[Request]:
@@ -89,7 +103,7 @@ def search_requests(
     if not 1 <= limit <= MAX_ROWS:
         raise ToolError(f"limit must be between 1 and {MAX_ROWS}. Use count_requests to count more than {MAX_ROWS} requests.")
     rows = sorted(_matching(service, neighborhood, status), key=lambda r: r.opened, reverse=True)
-    return [r.as_dict() for r in rows[:limit]]
+    return [_masked(r) for r in rows[:limit]]
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -151,6 +165,8 @@ def median_close_hours(
 def get_request(request_id: str) -> dict:
     """Return one 311 request by its service request id, with all its fields.
 
+    The address is shown only to the block. The caller is logged.
+
     Use this when you already have an id, for example from search_requests or
     from the user.
     Use search_requests instead when you only know the service, neighborhood
@@ -159,7 +175,8 @@ def get_request(request_id: str) -> dict:
     request = BY_ID.get(request_id)
     if request is None:
         raise ToolError(f"No request with id {request_id!r}. Use search_requests to find valid ids.")
-    return request.as_dict()
+    logger.info("get_request %s by %s", request_id, caller_email() or "local")
+    return _masked(request)
 
 
 if __name__ == "__main__":
